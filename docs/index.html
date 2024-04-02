@@ -1,0 +1,411 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <title>Map: Vampires Dawn III - The Crimson Realm</title>
+
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="leaflet/leaflet.css" />
+    <link rel="stylesheet" href="leaflet/leaflet-search.css" />
+
+    <script src="leaflet/leaflet.js"></script>
+    <script src="leaflet/leaflet-search.min.js"></script>
+    <script src="map-data.js"></script>
+
+    <style type="text/css">
+        #map-container {
+            width: 100%
+        }
+
+        html,
+        body,
+        #map-container {
+            height: 100%;
+            margin: 0;
+            padding: 0;
+            background-color: slategray;
+            font-family: sans-serif;
+        }
+
+        #title-container {
+            margin: 0;
+            position: absolute;
+            top: 10px;
+            z-index: 800;
+            width: 100%;
+        }
+
+        #title-container h1 {
+            font-size: 24px;
+            background-color: white;
+            border: 2px solid rgba(0, 0, 0, 0.2);
+            border-radius: 4px;
+            background-clip: padding-box;
+            padding: 3px 10px;
+            margin: 0 auto;
+            width: max-content;
+            display: block;
+        }
+
+        #control-map-picker,
+        #control-map-nav-worldmap {
+            font-size: 22px;
+        }
+
+        #control-map-picker svg,
+        #control-map-nav-worldmap svg {
+            padding-top: 4px;
+            width: 1em;
+            height: 1em;
+        }
+
+        .item-description ul {
+            padding: 0;
+        }
+
+        .marker-coords {
+            text-align: center;
+            font-size: 90%;
+            color: gray;
+        }
+
+        dialog {
+            border: 2px solid rgba(0, 0, 0, 0.2);
+            border-radius: 4px;
+            background-clip: padding-box;
+        }
+
+        dialog::backdrop {
+            background: #fff5;
+            backdrop-filter: blur(4px);
+        }
+
+        .leaflet-div-icon {
+            background: transparent;
+            border: none;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="title-container">
+        <h1 id="title">&nbsp;</h1>
+    </div>
+
+    <div id="map-container"></div>
+
+    <dialog id="map-picker-dialog">
+        <h3>Search a map to open</h3>
+        <datalist id="map-name-list"></datalist>
+        <form method="get" action="index.html">
+            <input id="selected-map-name"  name="vd3-map-name" list="map-name-list">
+            <input id="selected-map-id" name="map" type="hidden">
+            <button id="navigate-map-button" type="submit" disabled>Open map</button>
+        </form>
+        <form method="dialog">
+            <button type="submit" style="float: right; margin-top: 20px;">Cancel</button>
+        </form>
+    </dialog>
+
+    <script>
+        const DEFAULT_MAP_ID = 1;
+
+        const params = new URLSearchParams(document.location.search);
+        const mapId = params.get("map") || DEFAULT_MAP_ID;
+
+        const navFromMap = params.get("navFromMap");
+        const navFromX = params.get("navFromX");
+        const navFromY = params.get("navFromY");
+        const navToX = params.get("navToX");
+        const navToY = params.get("navToY");
+        const hasNavCoords = !!navFromMap && !!navFromX && !!navFromY && !!navToX && !!navToY;
+
+        const debugMode = params.get("debug") === "true";
+
+        const map = window.mapData[mapId];
+        document.getElementById('title').textContent = map.name;
+
+        const leafletMap = L.map('map-container', {
+            crs: L.CRS.Simple,
+            zoomSnap: 0.5,
+            zoomDelta: 0.5
+        });
+        const bounds = [[0, 0], [map.height, map.width]];
+        leafletMap.fitBounds(bounds);
+
+        const mapImage = L.imageOverlay('images/Map' + mapId.toString().padStart(3, "0") + '.png', bounds).addTo(leafletMap);
+        const markersLayer = new L.LayerGroup().addTo(leafletMap);
+        const itemsLayer = new L.LayerGroup().addTo(leafletMap);
+        const trapsLayer = new L.LayerGroup().addTo(leafletMap);
+        const hiddenPassageLayer = new L.LayerGroup().addTo(leafletMap);
+        const eventsLayer = new L.LayerGroup(); // Disabled by default
+
+        var layerControl = L.control.layers(
+            {
+                'Map Image': mapImage
+            },
+            {
+                'Transitions': markersLayer,
+                'Items': itemsLayer,
+                'Traps': trapsLayer,
+                'Hidden Passages': hiddenPassageLayer,
+                'Other Events': eventsLayer
+            },
+            {
+                'hideSingleBase': true,
+                'collapsed': false,
+                'position': 'bottomright'
+            })
+            .addTo(leafletMap)
+
+        const redIcon = new L.Icon({
+            iconUrl: 'leaflet/images/marker-icon-2x-red.png',
+            shadowUrl: 'leaflet/images/marker-shadow.png',
+            iconSize: [25, 41],
+            iconAnchor: [12, 41],
+            popupAnchor: [1, -34],
+            shadowSize: [41, 41]
+        });
+
+        const itemIcon = new L.DivIcon({
+            iconSize: [25, 40],
+            iconAnchor: [12.5, 40],
+            html: '<svg height="40" width="25"><use href="#icon-item"></use></svg>'
+        });
+
+        let foundMarker = false;
+        for (const teleport of map.teleports) {
+            const targetMapName = window.mapData[teleport.to.map].name;
+            const targetUrl = `index.html?map=${teleport.to.map}&navFromMap=${mapId}&navFromX=${teleport.from.x}&navFromY=${teleport.from.y}&navToX=${teleport.to.x}&navToY=${teleport.to.y}`
+            const markerLatLng = L.latLng([map.height - teleport.from.y - 0.5, teleport.from.x + 0.5]);
+            const markerOpts = {
+                title: targetMapName
+            };
+            if (hasNavCoords && (Math.abs(teleport.from.x - navToX) <= 1 && Math.abs(teleport.from.y - navToY) <= 1)) {
+                markerOpts.icon = redIcon;
+                foundMarker = true;
+            }
+            const marker = L.marker(markerLatLng, markerOpts);
+            marker.bindPopup(`<a href="${targetUrl}">${targetMapName}</a>`);
+            markersLayer.addLayer(marker);
+        }
+
+        if (!foundMarker && hasNavCoords) {
+            const targetMapName = window.mapData[navFromMap].name;
+            const targetUrl = `index.html?map=${navFromMap}&navFromMap=${mapId}&navFromX=${navToX}&navFromY=${navToY}&navToX=${navFromX}&navToY=${navFromY}`
+            const markerLatLng = L.latLng([map.height - parseInt(navToY) - 0.5, parseInt(navToX) + 0.5]);
+            const markerOpts = {
+                title: targetMapName,
+                icon: redIcon
+            };
+            const marker = L.marker(markerLatLng, markerOpts);
+            marker.bindPopup(`<a href="${targetUrl}">${targetMapName}</a>`);
+            markersLayer.addLayer(marker);
+        }
+
+        for (const item of map.items) {
+            const markerLatLng = L.latLng([map.height - item.y - 0.5, item.x + 0.5]);
+            const markerOpts = {
+                title: 'Items',
+                icon: itemIcon,
+                zIndexOffset: 1000,
+                interactive: true
+            }
+            const marker = L.marker(markerLatLng, markerOpts);
+            const itemDescription = document.createElement('div');
+            itemDescription.setAttribute('class', 'item-description');
+            if (item.items.length === 1) {
+                const para = itemDescription.appendChild(document.createElement('p'));
+                para.textContent = `${item.items[0].ammount} ${item.items[0].name}`;
+            } else {
+                const list = itemDescription.appendChild(document.createElement('ul'));
+                for (const containedItem of item.items) {
+                    const listItem = list.appendChild(document.createElement('li'));
+                    const textContainer = listItem.appendChild(document.createElement(containedItem.hasCondition ? 'i' : 'span'));
+                    textContainer.textContent = `${containedItem.ammount} ${containedItem.name}`;
+                }
+            }
+            if (item.lockLevel > 0) {
+                const lockInfo = itemDescription.appendChild(document.createElement('p'));
+                lockInfo.setAttribute('class', 'marker-coords');
+                lockInfo.textContent = `Lock Level ${item.lockLevel}`;
+            }
+            if (item.searchSkill > 0) {
+                const searchInfo = itemDescription.appendChild(document.createElement('p'));
+                searchInfo.setAttribute('class', 'marker-coords');
+                searchInfo.textContent = `Search Skill Level ${item.searchSkill}`;
+            }
+            if (debugMode) {
+                const coords = itemDescription.appendChild(document.createElement('p'));
+                coords.setAttribute('class', 'marker-coords');
+                coords.textContent = `x=${item.x}, y=${item.y}`;
+            }
+
+            marker.bindPopup(itemDescription);
+            itemsLayer.addLayer(marker);
+        }
+
+        const directionSVGs = {
+            6: '<use href="#icon-arrow-right"></use>',
+            2: '<use href="#icon-arrow-down"></use>',
+            4: '<use href="#icon-arrow-left"></use>'
+        }
+
+        for (const hiddenPassage of map.hiddenPassages) {
+            const svgElement = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+            svgElement.setAttribute('xmlns', "http://www.w3.org/2000/svg");
+            
+            svgElement.innerHTML = directionSVGs[hiddenPassage.direction];
+            const bounds = [[map.height - hiddenPassage.y, hiddenPassage.x], [map.height - hiddenPassage.y - 1, hiddenPassage.x + 1]];
+            L.svgOverlay(svgElement, bounds).addTo(hiddenPassageLayer);
+        }
+
+        for (const trap of map.traps) {
+            const bounds = [[map.height - trap.y, trap.x], [map.height - trap.y - 1, trap.x + 1]];
+            L.rectangle(bounds, {color: "red", weight: 1, interactive: false}).addTo(trapsLayer);
+        }
+
+        for (const event of map.events) {
+            const bounds = [[map.height - event.y, event.x], [map.height - event.y - 1, event.x + 1]];
+            const rect = L.rectangle(bounds, {color: "cornflowerblue", weight: 1, interactive: debugMode}).addTo(eventsLayer);
+            if (debugMode) {
+                const coords = document.createElement('p');
+                coords.setAttribute('class', 'marker-coords');
+                coords.textContent = `x=${event.x}, y=${event.y}`;
+                rect.bindPopup(coords);
+            }
+        }
+
+        const markerSearchControl = new L.Control.Search({
+            position: 'topright',
+            layer: markersLayer,
+            initial: false,
+            zoom: 5,
+            hideMarkerOnCollapse: true,
+            collapsed: true
+        });
+        leafletMap.addControl(markerSearchControl);
+
+        const MapPickerControl = L.Control.extend({
+            onAdd: function () {
+                const container = L.DomUtil.create('div', 'leaflet-bar');
+                container.id = "control-map-picker";
+
+                const link = L.DomUtil.create('a', '', container);
+                link.href = '#';
+                link.title = 'Open another map';
+                link.innerHTML = '<svg><use href="#icon-mappicker"></use></svg>';
+
+                L.DomEvent.disableClickPropagation(link);
+                L.DomEvent.on(link, 'click', L.DomEvent.stop);
+                L.DomEvent.on(link, 'click', () => document.getElementById('map-picker-dialog').showModal(), this);
+
+                const datalist = document.getElementById('map-name-list');
+                for (const map of Object.values(window.mapData)) {
+                    const option = L.DomUtil.create('option', '', datalist);
+                    option.value = map.name;
+                }
+
+                return container;
+            }
+        });
+        leafletMap.addControl(new MapPickerControl({ position: 'topleft' }));
+
+        const navigateMapButton = document.getElementById('navigate-map-button');
+        const selectedMapIdInput = document.getElementById('selected-map-id');
+        document.getElementById('selected-map-name').addEventListener('input', (ev) => {
+            const [foundMapId, foundMap] = Object.entries(window.mapData).find(([id, map]) => map.name === (event.target.value)) || [];
+            navigateMapButton.disabled = (foundMap === undefined);
+            if (foundMap) {
+                selectedMapIdInput.value = foundMapId;
+            }
+        });
+
+        if (mapId != DEFAULT_MAP_ID) {
+            const WorldMapNavControl = L.Control.extend({
+                onAdd: function () {
+                    const container = L.DomUtil.create('div', 'leaflet-bar');
+                    container.id = "control-map-nav-worldmap";
+
+                    const link = L.DomUtil.create('a', '', container);
+                    link.href = `index.html?map=${DEFAULT_MAP_ID}`;
+                    link.title = 'Open world map';
+                    link.innerHTML = '<svg><use href="#icon-worldmap"></use></svg>';
+
+                    L.DomEvent.disableClickPropagation(link);
+                    L.DomEvent.on(link, 'click', L.DomEvent.stop);
+                    L.DomEvent.on(link, 'click', () => window.location = 'index.html?map=1', this);
+
+                    return container;
+                }
+            });
+            leafletMap.addControl(new WorldMapNavControl({ position: 'topleft' }));
+        }
+
+    </script>
+
+    <svg style="display: none;" xmlns="http://www.w3.org/2000/svg">
+        <symbol id="icon-item" viewBox="0 0 320 512">
+            <path style="fill:goldenrod"
+                d="M 160 0 C 67.369 0 0 80.331 0 167.724 C 0 220.69 17.684 248.938 41.263 300.138 C 88.421 402.538 160 512 160 512 C 160 512 231.579 402.538 278.737 300.138 C 302.316 248.938 320 220.69 320 167.724 C 320 80.331 252.631 0 160 0">
+            </path>
+            <g stroke-width="3" stroke="#000000" fill="none"
+                transform="matrix(4.545214, 0, 0, 4.545214, 14.553142, 21.594296)">
+                <ellipse cx="23.07" cy="14.99" rx="15.22" ry="5.24" stroke-linecap="round"></ellipse>
+                <path d="M38.3,21.8c0,2.89-6.82,5.24-15.23,5.24S7.85,24.69,7.85,21.8" stroke-linecap="round"></path>
+                <path d="M27.38,33.43c-.4,0-3.9,0-4.31,0-8.41,0-15.22-2.35-15.22-5.24" stroke-linecap="round"></path>
+                <path d="M24.91,40c-.6,0-1.22,0-1.84,0-8.41,0-15.22-2.34-15.22-5.24" stroke-linecap="round"></path>
+                <path d="M25.7,46.53a22.48,22.48,0,0,1-2.63.08c-8.41,0-15.22-2.35-15.22-5.24" stroke-linecap="round">
+                </path>
+                <line x1="7.85" y1="41.42" x2="7.85" y2="15.01" stroke-linecap="round"></line>
+                <line x1="38.3" y1="30.01" x2="38.3" y2="14.99" stroke-linecap="round"></line>
+                <ellipse cx="40.93" cy="35.82" rx="15.22" ry="5.24" stroke-linecap="round"></ellipse>
+                <path d="M56.15,42.63c0,2.9-6.81,5.24-15.22,5.24S25.7,45.53,25.7,42.63" stroke-linecap="round"></path>
+                <path d="M56.15,49c0,2.9-6.81,5.25-15.22,5.25S25.7,51.91,25.7,49" stroke-linecap="round"></path>
+                <line x1="25.7" y1="48.92" x2="25.7" y2="35.07" stroke-linecap="round"></line>
+                <line x1="56.15" y1="49.21" x2="56.15" y2="35.64" stroke-linecap="round"></line>
+            </g>
+        </symbol>
+        <symbol id="icon-worldmap" fill="#000000" viewBox="-67 69 120 120" xml:space="preserve">
+            <path d="M-7,70.7c-32.2,0-58.3,26.1-58.3,58.3s26.1,58.3,58.3,58.3s58.3-26.1,58.3-58.3S25.2,70.7-7,70.7z M-7,181.4
+                c-28.9,0-52.4-23.5-52.4-52.4c0-11.5,3.8-22.2,10.1-30.8c1.6-0.9,2.7-2.4,5-1.9c0,0.4,0.3,1.2,0.3,1.4c1.1-0.2,1.7-1.2,2-2.4
+                c1.7,1.7-0.1,4.4-0.7,6.1c5.9,0.8,3.9-3.3,4.7-6.8c0.7-3.1,6.1-4.4,5.2-8.3c-1.7-0.3-3.3,0.1-4.9,0.9c-0.1-0.2-0.1-0.4-0.1-0.7
+                c1.9-1.3,3.8-2.5,5.8-3.7c3.4-0.1,4.1,3,0.6,4.3c-1.2,3.9,3.5,1.7,4.7,1.2c1.4-0.7,1.2-0.9,3-1.2c1.6-0.3,2.8,0.2,4.2-0.6
+                c-1.3,4.2-6.6,4.2-8.9,7.4c-3.3,4.8,5.2,3.3,7.9,1.1c1.7-1.4,2.2-3.8,3.8-4.9c1.9-1.3,4.5-0.3,5-2.9c0.1-0.6-1.7-4.1-1.8-4.5
+                c-1-2.4-2.3-2.1,0-4.9c-0.6,0.1-1.2-0.1-1.8-0.1c0-0.2,0-0.4,0-0.7c2.8-0.4,5.6-0.8,8.6-0.8c2.7,0,5.4,0.2,8,0.6
+                c1.9,1.2,3.3,3.1,5.1,4.9c5.2,5.1-2.7,3.5-2.1,7.2c0.3,2.1,2.9,1,1.1,4.2c-1,1.8-3.4,2.1-3,4.3c-4.1,0.7-6.4-2.7-10.5-1.1
+                c-2,0.8-4.2,2-4.7,3.9c-0.7,3.3,2,3,4.1,4.7c1.8,1.4,1.6,1.4,1.1,4.4c-0.4,2.7-0.3,3.8-2.9,4.8c-1.2,0.4-2.8,0.2-3.9,0.9
+                c-0.3,0.2-0.7,1.8-1.2,2.2c-1.4,1-5.6,0.6-4.5,3.7c1.6,0.2,2.5-0.7,3.9-0.7c3-0.1,1.4,0.4,3.4,2c2.2,1.7,5.4,1.9,8.1,3
+                c1.3,0.6,2.2,1.6,3.8,1.4c0.4,2.5-1.7,3.1-3.7,3.7c-3,0.9-3.9,0.7-5.6-2c-2.2-3.3-2.7-2.3-6.9-2.8c-1.8-0.1-6.6-0.7-7.8-2.1
+                c-1.4-1.8,0.3-4.3,1.8-5.3c2.4-1.7,3-1.3,4.4-3.7c1.8-2.7,1.8-1.8,4.3-2.9c2.1-0.9,3.8-2.3,3.7-4.8c-1.4-0.3-2.1-1.6-2.1-2.9
+                l-2.5-0.9c0.2,1.1,3.5,9.4-1.2,7.1c-1.8-0.9,0-8.9-4.9-7.3c0.2,2.3-0.6,2.7-2.2,4c-2.3,2-2.4,0-1.7,3c0.6,2,2,1.7,1.2,4.3
+                c-0.4,1.7-2.9,1.8-0.7,4c-1.1,0.2-2.2,0.1-3.1-0.3c-2.7,2.7-1.2,3.5-2.3,6.9c-1.1,3.5-5.6,4.5-8,7c-4.1,4.3-5.2,15.4,0.6,18.6
+                c4.5,2.5,9,0.1,13.5,1.8c3,1.1,3.9,2.9,4.3,5.8c0.4,3.3,3.3,5.2,3.8,9.2c0.3,3.3,0.1,5.5,2.3,8.1c1.1,1.2,3.3,3.3,4.9,4
+                c2.7,1.1,3.5-0.1,5.8-1.2c0.8-0.3,2.1-0.6,2.9-0.9c2-1,1.1-0.2,2.2-1.9c1.1-1.6,1.6-3.5,3-5.1c1.9-1.9,2.5-2.5,3.5-5
+                c0.8-1.9,0.9-3.9,1.7-6c0.8-2,2.8-3.8,3.9-5.5c1.2-1.8,1.6-4.2,3-5.8c-1.8,0.1-5,0.8-6.8,0.2c-2-0.7-2.4-2.9-3.8-4.5
+                c-2.2-2.9-6.1-7.3-5.9-11.4c1.4-0.2,5.6,7.4,6.5,8.9c3,4.4,5,3.1,8.9,1.3c1.9-0.9,9.6-5.3,6.4-8.1c-2.1-1.8-10.5,2.9-9.6-2.3
+                c3.4-0.1,7.5-0.3,10.9-1c1.7-0.3,3-1.3,4.7-1.1c0.3,0,1,1.6,1.6,1.8c0.9,0.3,2.4,0,3.4,0c0.2,2.4,3.3,9.3,6.5,8.5
+                c0.2-5.3,0-10.2,1.3-15.3c1.3-0.2,2.7-0.1,4.1-0.1c0.1,1.3,0.1,2.7,0.1,4.1C45.4,157.9,21.9,181.4-7,181.4z"/>
+        </symbol>
+        <symbol id="icon-mappicker" viewBox="0 0 24 24" fill="none">
+            <path stroke="#000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M3 19.382V5.721a1 1 0 0 1 .684-.949l4.684-1.561a2
+            2 0 0 1 1.264 0l4.736 1.578a2 2 0 0 0 1.264 0l4.052-1.35A1 1 0 0 1 21 4.387v12.995a1 1 0 0 1-.553.894l-4.553 2.277a2 2 0 0 1-1.788
+            0l-4.212-2.106a2 2 0 0 0-1.788 0l-3.659 1.83A1 1 0 0 1 3 19.381ZM15 5v15.5M9 4v14"/>
+        </symbol>
+        <symbol id="icon-arrow-up" viewBox="0 0 24 24" fill="none">
+            <path d="M16 9L12 5M12 5L8 9M12 5V19" stroke="red" stroke-width="2" stroke-linecap="round"/>
+        </symbol>
+        <symbol id="icon-arrow-right" viewBox="0 0 24 24" fill="none">
+            <path d="M15 8L19 12M19 12L15 16M19 12H5" stroke="red" stroke-width="2" stroke-linecap="round"/>
+        </symbol>
+        <symbol id="icon-arrow-down" viewBox="0 0 24 24" fill="none">
+            <path d="M16 15L12 19M12 19L8 15M12 19V5" stroke="red" stroke-width="2" stroke-linecap="round"/>
+        </symbol>
+        <symbol id="icon-arrow-left" viewBox="0 0 24 24" fill="none">
+            <path d="M9 8L5 12M5 12L9 16M5 12H19" stroke="red" stroke-width="2" stroke-linecap="round"/>
+        </symbol>        
+    </svg>
+</body>
+
+</html>
